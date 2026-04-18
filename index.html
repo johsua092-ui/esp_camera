@@ -154,8 +154,8 @@ input[type=range]#zoom-slider::-webkit-slider-runnable-track{background:rgba(0,2
 <div id="overlay" style="display:none">
   <div id="overlay-box">
     <h2>✦ AI AKURASI TINGGI</h2>
-    <p>Masukkan Anthropic API key untuk Claude Vision — deteksi jauh lebih akurat, kenali kucing, warna, detail spesifik.<br><br>Gratis di: console.anthropic.com</p>
-    <input class="inp" id="api-inp" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
+    <p>Masukkan OpenRouter API key untuk Gemini Vision — deteksi jauh lebih akurat, kenali kucing, warna, detail spesifik.<br><br>Gratis di: openrouter.ai/keys</p>
+    <input class="inp" id="api-inp" type="password" placeholder="sk-or-v1-..." autocomplete="off" spellcheck="false">
     <button class="btn on" onclick="saveKey()" style="width:100%;font-size:11px;padding:11px">AKTIFKAN ✦</button>
     <button class="btn" onclick="closeModal()" style="width:100%;margin-top:6px;font-size:10px;padding:8px;opacity:.4">LEWATI</button>
   </div>
@@ -193,6 +193,8 @@ let apiKey=localStorage.getItem('esp_k')||'', aiOn=false, aiObjs=[], lastAi=0, a
 let fc=0, fps=0, fpsT=performance.now(), legendTmr=null, zoomLevel=1.0;
 let leafMap=null, leafMarker=null, headingMarker=null, mapOn=false, gpsWatch=null;
 let lastLat=null, lastLng=null, lastAcc=null, lastHeading=null;
+// Cat tracker
+let catLastSeen=null, catMissing=false, catMissingTimer=null, catPulse=0;
 
 // ── Zoom ──────────────────────────────────────────────────
 function onZoom(v){
@@ -356,7 +358,50 @@ function drawBox(x,y,w,h,col,label,glow){
   ctx.restore();
 }
 
-// ── Claude Vision AI (high accuracy) ─────────────────────
+// ── Cat pulse highlight ───────────────────────────────────
+function drawCatBox(x,y,w,h,label){
+  if(w<5||h<5)return;
+  catPulse=(catPulse+0.08)%(Math.PI*2);
+  const glow=18+Math.sin(catPulse)*12;
+  const col='#c084fc';
+  const cl=Math.min(w,h)*.2+5;
+  ctx.save();
+  ctx.strokeStyle=col;ctx.lineWidth=2.5;
+  ctx.shadowColor=col;ctx.shadowBlur=glow;
+  if(st.hl){ctx.fillStyle=col+'18';ctx.fillRect(x,y,w,h);}
+  [[x,y+cl,x,y,x+cl,y],[x+w-cl,y,x+w,y,x+w,y+cl],
+   [x,y+h-cl,x,y+h,x+cl,y+h],[x+w-cl,y+h,x+w,y+h,x+w,y+h-cl]].forEach(p=>{
+    ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.lineTo(p[4],p[5]);ctx.stroke();
+  });
+  // Paw icon di pojok
+  ctx.shadowBlur=0;ctx.font='bold 11px Courier New,monospace';
+  const tw=ctx.measureText(label).width+10;
+  ctx.fillStyle=col+'dd';ctx.fillRect(x,y-20,Math.min(tw,w+8),18);
+  ctx.fillStyle='#000';ctx.fillText(label,x+5,y-5);
+  ctx.restore();
+}
+
+// ── Draw last seen cat ghost ──────────────────────────────
+function drawCatGhost(){
+  if(!catLastSeen||!catMissing)return;
+  const {x,y,w,h,dir,time}=catLastSeen;
+  const age=(performance.now()-time)/1000; // seconds
+  if(age>30){catMissing=false;catLastSeen=null;return;} // hapus setelah 30 detik
+  const alpha=Math.max(0.1,0.6-age/30);
+  const pulse=0.4+Math.sin(catPulse*2)*0.3;
+  ctx.save();
+  ctx.strokeStyle=`rgba(192,132,252,${alpha*pulse})`;
+  ctx.lineWidth=1.5;ctx.setLineDash([5,5]);
+  ctx.shadowColor='#c084fc';ctx.shadowBlur=10*pulse;
+  ctx.strokeRect(x,y,w,h);
+  ctx.setLineDash([]);
+  ctx.font='bold 10px Courier New';
+  ctx.fillStyle=`rgba(192,132,252,${alpha})`;
+  ctx.fillText(`🐱 TERAKHIR: ${dir} (${Math.round(age)}s lalu)`,x,y-5);
+  ctx.restore();
+}
+
+// ── OpenRouter Gemini Vision AI ───────────────────────────
 async function runAI(){
   if(aiRunning||!apiKey||!video.videoWidth)return;
   aiRunning=true;
@@ -367,21 +412,26 @@ async function runAI(){
     s.width=800; s.height=Math.round(800*video.videoHeight/video.videoWidth);
     s.getContext('2d').drawImage(video,0,0,s.width,s.height);
     const b64=s.toDataURL('image/jpeg',.82).split(',')[1];
-    const res=await fetch('https://api.anthropic.com/v1/messages',{
+    const res=await fetch('https://openrouter.ai/api/v1/chat/completions',{
       method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      headers:{
+        'Content-Type':'application/json',
+        'Authorization':`Bearer ${apiKey}`,
+        'HTTP-Referer':'https://johsua092-ui.github.io/esp_camera/',
+        'X-Title':'ESP.AI Camera'
+      },
       body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
+        model:'google/gemini-flash-1.5',
         max_tokens:1500,
         messages:[{role:'user',content:[
-          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},
-          {type:'text',text:'You are an object detection system. Detect ALL visible objects in this image. Return ONLY a raw JSON array with no markdown, no code blocks, no explanation. Each item: {"label":"exact_english_name","x":0.0,"y":0.0,"w":0.0,"h":0.0,"conf":0.0} where x,y are top-left corner as fraction of image width/height, w,h are width/height fractions. conf is 0-1 confidence. Include: people, animals (cats, dogs, birds especially), vehicles, furniture, electronics, food, household items, bags, plants. Minimum confidence 0.4.'}
+          {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}},
+          {type:'text',text:'You are an object detection system. Detect ALL visible objects especially cats, people, animals. Return ONLY a raw JSON array with no markdown, no code blocks, no explanation. Each item: {"label":"exact_english_name","x":0.0,"y":0.0,"w":0.0,"h":0.0,"conf":0.0} where x,y are top-left corner as fraction of image width/height, w,h are width/height fractions. conf is 0-1 confidence. Minimum confidence 0.4. Pay extra attention to cats - detect even partially hidden cats.'}
         ]}]
       })
     });
     if(!res.ok)throw new Error(res.status);
     const d=await res.json();
-    let txt=(d.content?.find(b=>b.type==='text')?.text||'[]');
+    let txt=(d.choices?.[0]?.message?.content||'[]');
     txt=txt.replace(/```[\w]*\n?/g,'').replace(/```/g,'').trim();
     const parsed=JSON.parse(txt);
     aiObjs=parsed.filter(o=>o.conf>=0.4).map(o=>({...o,sw:s.width,sh:s.height}));
@@ -410,7 +460,14 @@ async function loop(){
       nms(ps).forEach(p=>{
         const r=scr(p.bbox[0],p.bbox[1],p.bbox[2],p.bbox[3],t);
         const ocx=r.x+r.w/2, ocy=r.y+r.h/2, col=gc(p.class);
-        drawBox(r.x,r.y,r.w,r.h,col,gn(p.class)+' '+Math.round(p.score*100)+'%',false);
+        const isCat=p.class==='cat';
+        if(isCat){
+          drawCatBox(r.x,r.y,r.w,r.h,'🐱KUCING '+Math.round(p.score*100)+'%');
+          catLastSeen={x:r.x,y:r.y,w:r.w,h:r.h,dir:getDir(ocx,ocy),time:performance.now()};
+          catMissing=false;
+        } else {
+          drawBox(r.x,r.y,r.w,r.h,col,gn(p.class)+' '+Math.round(p.score*100)+'%',false);
+        }
         drawLine(cx,cy,ocx,ocy,col);
         seen.push({n:gn(p.class),col,d:getDir(ocx,ocy)});
         counts[p.class]=(counts[p.class]||0)+1;
@@ -438,6 +495,7 @@ async function loop(){
 
     // Claude AI overlay — every 2.5s, higher accuracy
     if(aiOn&&aiObjs.length){
+      let aiCatFound=false;
       aiObjs.forEach(o=>{
         const vw=video.videoWidth||640, vh=video.videoHeight||480;
         const ratio=o.sh/o.sw;
@@ -445,15 +503,28 @@ async function loop(){
         const cl=o.label.toLowerCase().trim();
         const col=gc(cl)||'#e2e8f0', nm=gn(cl)||o.label.toUpperCase();
         const ocx=r.x+r.w/2, ocy=r.y+r.h/2;
-        ctx.save();ctx.strokeStyle=col+'40';ctx.lineWidth=1;ctx.setLineDash([3,6]);
+        const isCat=cl==='cat'||cl.includes('cat');
+        ctx.save();ctx.strokeStyle=(isCat?'#c084fc':'#ffffff')+'40';ctx.lineWidth=1;ctx.setLineDash([3,6]);
         ctx.strokeRect(r.x-5,r.y-5,r.w+10,r.h+10);ctx.setLineDash([]);ctx.restore();
-        drawBox(r.x,r.y,r.w,r.h,col,'✦'+nm+' '+Math.round((o.conf||.9)*100)+'%',true);
+        if(isCat){
+          drawCatBox(r.x,r.y,r.w,r.h,'✦🐱KUCING '+Math.round((o.conf||.9)*100)+'%');
+          catLastSeen={x:r.x,y:r.y,w:r.w,h:r.h,dir:getDir(ocx,ocy),time:performance.now()};
+          catMissing=false; aiCatFound=true;
+        } else {
+          drawBox(r.x,r.y,r.w,r.h,col,'✦'+nm+' '+Math.round((o.conf||.9)*100)+'%',true);
+        }
         drawLine(cx,cy,ocx,ocy,col);
         seen.push({n:nm,col,d:getDir(ocx,ocy)});
         counts[cl]=(counts[cl]||0)+1;
       });
     }
     if(aiOn&&performance.now()-lastAi>2500){lastAi=performance.now();runAI();}
+
+    // Cat missing detection
+    if(catLastSeen&&performance.now()-catLastSeen.time>4000){
+      catMissing=true;
+    }
+    drawCatGhost();
   }
 
   // Center reticle
@@ -484,11 +555,21 @@ async function loop(){
   }
   document.getElementById('dirbox').innerHTML=dh||`<span style="opacity:.25;color:var(--g)">${espOn?'MENDETEKSI...':'— ESP OFF —'}</span>`;
 
-  // Cat found alert
+  // Cat found/missing alert
   const catF=seen.find(o=>o.n==='KUCING 🐱');
   const alertEl=document.getElementById('cat-alert');
-  if(catF){alertEl.style.opacity='1';document.getElementById('cat-alert-txt').textContent='◆ KUCING DITEMUKAN! '+catF.d+' ◆';}
-  else alertEl.style.opacity='0';
+  const alertTxt=document.getElementById('cat-alert-txt');
+  if(catF){
+    alertEl.style.opacity='1';
+    alertTxt.style.color='var(--p)';
+    alertTxt.textContent='◆ KUCING DITEMUKAN! '+catF.d+' ◆';
+  } else if(catMissing&&catLastSeen){
+    alertEl.style.opacity='1';
+    alertTxt.style.color='#ff9500';
+    alertTxt.textContent='⚠ KUCING HILANG! TERAKHIR: '+catLastSeen.dir+' ⚠';
+  } else {
+    alertEl.style.opacity='0';
+  }
 
   requestAnimationFrame(loop);
 }
