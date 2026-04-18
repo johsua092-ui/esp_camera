@@ -13,6 +13,11 @@
   "categories": [
     "utilities"
   ],
+  "permissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
   "screenshots": [],
   "icons": [
     {
