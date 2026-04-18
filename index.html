@@ -145,6 +145,7 @@ input[type=range]#zoom-slider::-webkit-slider-runnable-track{background:rgba(0,2
     <button class="btn b on" id="btn-hl"   onclick="tog('hl')">◈ GLOW</button>
     <button class="btn y"   id="btn-map"    onclick="togMap()">🗺 MAP</button>
     <button class="btn p"   id="btn-ai"     onclick="showAiModal()">✦ AI+</button>
+    <button class="btn p"   id="btn-cat"    onclick="togCatMode()">🐱 CARI</button>
     <button class="btn p"   id="btn-leg"    onclick="showLegend()">☰ WARNA</button>
     <button class="btn"                     onclick="flipCam()">↺ KAMERA</button>
     <button class="btn b"                   onclick="loadWx()">⟳ CUACA</button>
@@ -195,6 +196,8 @@ let leafMap=null, leafMarker=null, headingMarker=null, mapOn=false, gpsWatch=nul
 let lastLat=null, lastLng=null, lastAcc=null, lastHeading=null;
 // Cat tracker
 let catLastSeen=null, catMissing=false, catMissingTimer=null, catPulse=0;
+// Cat search mode + compass
+let catMode=false, deviceHeading=0, compassAvail=false;
 
 // ── Zoom ──────────────────────────────────────────────────
 function onZoom(v){
@@ -249,14 +252,32 @@ function initLeaf(){
 
 function startGPS(){
   if(!navigator.geolocation)return;
+  // Device orientation for compass
+  if(window.DeviceOrientationEvent){
+    const handler=e=>{
+      if(e.webkitCompassHeading!=null){deviceHeading=e.webkitCompassHeading;compassAvail=true;}
+      else if(e.alpha!=null){deviceHeading=(360-e.alpha)%360;compassAvail=true;}
+    };
+    if(typeof DeviceOrientationEvent.requestPermission==='function'){
+      DeviceOrientationEvent.requestPermission().then(p=>{if(p==='granted')window.addEventListener('deviceorientation',handler,true);}).catch(()=>{});
+    } else {
+      window.addEventListener('deviceorientation',handler,true);
+    }
+  }
   gpsWatch=navigator.geolocation.watchPosition(pos=>{
     const{latitude:lat,longitude:lng,accuracy:acc,heading}=pos.coords;
     lastLat=lat; lastLng=lng; lastAcc=Math.round(acc);
-    if(heading!==null&&!isNaN(heading)) lastHeading=heading;
+    if(heading!==null&&!isNaN(heading)&&!compassAvail) deviceHeading=heading;
 
     if(leafMap&&leafMarker){
       leafMarker.setLatLng([lat,lng]);
       leafMap.setView([lat,lng],18);
+      // Rotate marker with heading
+      if(window._hdgMarker) window._hdgMarker.remove();
+      window._hdgMarker=L.marker([lat,lng],{icon:L.divIcon({
+        html:`<div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:18px solid #00ff41;transform:rotate(${deviceHeading}deg);transform-origin:center bottom;filter:drop-shadow(0 0 4px #00ff41)"></div>`,
+        iconSize:[12,18],iconAnchor:[6,18],className:''
+      })}).addTo(leafMap);
     }
 
     // Accuracy circle
@@ -265,13 +286,12 @@ function startGPS(){
       window._accCircle=L.circle([lat,lng],{radius:acc,color:'#00ff41',fillColor:'#00ff41',fillOpacity:0.05,weight:1,dashArray:'4,6'}).addTo(leafMap);
     }
 
-    // Update HUD
     document.getElementById('map-acc').textContent=`±${Math.round(acc)}m`;
     document.getElementById('map-coords').style.cssText='position:absolute;bottom:3px;left:0;right:0;text-align:center;font-size:7px;letter-spacing:1px;color:#00ff41;background:rgba(0,0,0,.6);padding:1px;z-index:10;pointer-events:none';
     document.getElementById('map-coords').textContent=`${lat.toFixed(5)},${lng.toFixed(5)}`;
   },err=>{
     document.getElementById('map-acc').textContent='GPS ERR';
-  },{enableHighAccuracy:true,timeout:15000,maximumAge:1000});
+  },{enableHighAccuracy:true,timeout:15000,maximumAge:500});
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -445,19 +465,48 @@ async function runAI(){
   aiRunning=false;
 }
 
-// ── Main render loop ──────────────────────────────────────
+// ── Draw 3D compass ───────────────────────────────────────
+function drawCompass(cx,cy){
+  const R=28, r2=20;
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.rotate(deviceHeading*Math.PI/180);
+  // Outer ring
+  ctx.beginPath();ctx.arc(0,0,R,0,Math.PI*2);
+  ctx.strokeStyle='rgba(0,255,65,0.3)';ctx.lineWidth=1;ctx.stroke();
+  // N arrow (red tip)
+  ctx.beginPath();ctx.moveTo(0,-R+4);ctx.lineTo(4,0);ctx.lineTo(0,-4);ctx.lineTo(-4,0);
+  ctx.fillStyle='#ff2d78';ctx.fill();
+  // S arrow (green)
+  ctx.beginPath();ctx.moveTo(0,R-4);ctx.lineTo(4,0);ctx.lineTo(0,4);ctx.lineTo(-4,0);
+  ctx.fillStyle='#00ff41';ctx.fill();
+  ctx.restore();
+  // N label
+  ctx.save();ctx.font='bold 7px Courier New';ctx.fillStyle='#ff2d78';
+  ctx.fillText('N',cx-3,cy-R-3);ctx.restore();
+}
+
+// ── Main render loop (FPS optimized) ─────────────────────
+let frameCount=0, skipFace=false;
 async function loop(){
   const W=window.innerWidth, H=window.innerHeight;
   if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;}
   ctx.clearRect(0,0,W,H);
   const t=getTx(), cx=W/2, cy=H/2, seen=[], counts={};
+  frameCount++;
 
   if(espOn){
-    // TF.js COCO — realtime, every frame
-    if(coco){
+    // TF.js COCO — run every 2 frames for FPS boost
+    if(coco&&frameCount%2===0){
       let ps=[];
-      try{ps=await coco.detect(video,20,0.25);}catch(e){}
-      nms(ps).forEach(p=>{
+      try{
+        // Cat mode: lebih sensitif, threshold lebih rendah
+        const thresh=catMode?0.15:0.25;
+        ps=await coco.detect(video,catMode?5:20,thresh);
+      }catch(e){}
+      // Cat mode: filter hanya cat
+      const filtered=catMode?ps.filter(p=>p.class==='cat'):ps;
+      nms(filtered).forEach(p=>{
         const r=scr(p.bbox[0],p.bbox[1],p.bbox[2],p.bbox[3],t);
         const ocx=r.x+r.w/2, ocy=r.y+r.h/2, col=gc(p.class);
         const isCat=p.class==='cat';
@@ -465,6 +514,7 @@ async function loop(){
           drawCatBox(r.x,r.y,r.w,r.h,'🐱KUCING '+Math.round(p.score*100)+'%');
           catLastSeen={x:r.x,y:r.y,w:r.w,h:r.h,dir:getDir(ocx,ocy),time:performance.now()};
           catMissing=false;
+          if(catMode&&navigator.vibrate) navigator.vibrate([100,50,100]);
         } else {
           drawBox(r.x,r.y,r.w,r.h,col,gn(p.class)+' '+Math.round(p.score*100)+'%',false);
         }
@@ -474,8 +524,8 @@ async function loop(){
       });
     }
 
-    // BlazeFace — realtime face
-    if(face){
+    // BlazeFace — skip kalau cat mode aktif (hemat FPS)
+    if(face&&!catMode&&frameCount%3===0){
       let fs=[];
       try{fs=await face.estimateFaces(video,false);}catch(e){}
       fs.forEach(f=>{
@@ -493,7 +543,7 @@ async function loop(){
       });
     }
 
-    // Claude AI overlay — every 2.5s, higher accuracy
+    // AI overlay
     if(aiOn&&aiObjs.length){
       let aiCatFound=false;
       aiObjs.forEach(o=>{
@@ -504,6 +554,7 @@ async function loop(){
         const col=gc(cl)||'#e2e8f0', nm=gn(cl)||o.label.toUpperCase();
         const ocx=r.x+r.w/2, ocy=r.y+r.h/2;
         const isCat=cl==='cat'||cl.includes('cat');
+        if(catMode&&!isCat)return; // cat mode: skip non-cat AI objects
         ctx.save();ctx.strokeStyle=(isCat?'#c084fc':'#ffffff')+'40';ctx.lineWidth=1;ctx.setLineDash([3,6]);
         ctx.strokeRect(r.x-5,r.y-5,r.w+10,r.h+10);ctx.setLineDash([]);ctx.restore();
         if(isCat){
@@ -518,7 +569,9 @@ async function loop(){
         counts[cl]=(counts[cl]||0)+1;
       });
     }
-    if(aiOn&&performance.now()-lastAi>2500){lastAi=performance.now();runAI();}
+    // Cat mode: scan AI lebih sering (1.5s)
+    const aiInterval=catMode?1500:2500;
+    if(aiOn&&performance.now()-lastAi>aiInterval){lastAi=performance.now();runAI();}
 
     // Cat missing detection
     if(catLastSeen&&performance.now()-catLastSeen.time>4000){
@@ -527,11 +580,20 @@ async function loop(){
     drawCatGhost();
   }
 
-  // Center reticle
+  // Center reticle + compass
   ctx.save();ctx.strokeStyle='#00ff4150';ctx.lineWidth=1;ctx.shadowColor='#00ff41';ctx.shadowBlur=12;
   ctx.beginPath();ctx.arc(cx,cy,17,0,Math.PI*2);ctx.stroke();
   ctx.beginPath();ctx.moveTo(cx-8,cy);ctx.lineTo(cx+8,cy);ctx.moveTo(cx,cy-8);ctx.lineTo(cx,cy+8);ctx.stroke();
   ctx.restore();
+
+  // Draw compass (pojok kanan atas)
+  if(compassAvail) drawCompass(W-40,50);
+
+  // Cat mode overlay border
+  if(catMode){
+    ctx.save();ctx.strokeStyle='rgba(192,132,252,0.4)';ctx.lineWidth=3;
+    ctx.strokeRect(2,2,W-4,H-4);ctx.restore();
+  }
 
   // FPS counter
   fc++;const now=performance.now();
@@ -577,19 +639,24 @@ async function loop(){
 // ── Weather ───────────────────────────────────────────────
 async function loadWx(){
   const wx=document.getElementById('weather');
-  wx.innerHTML='<span style="opacity:.5">⏳...</span>';
+  wx.innerHTML='<span style="opacity:.5">⏳ CUACA...</span>';
   try{
-    const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:10000,enableHighAccuracy:true}));
+    const pos=await new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(res,rej,{timeout:12000,enableHighAccuracy:true}));
     const{latitude:lat,longitude:lon}=pos.coords;
-    const[wR,gR]=await Promise.all([
-      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weathercode,windspeed_10m,relative_humidity_2m,apparent_temperature`),
-      fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
-    ]);
-    const wD=await wR.json(), gD=await gR.json(), c=wD.current, wc=c.weathercode;
-    const icon=wc<=2?'☀':wc<=3?'⛅':wc<=48?'🌫':wc<=67?'🌧':wc<=77?'❄':wc<=82?'🌦':'⛈';
-    const city=gD.address?.city||gD.address?.town||gD.address?.village||'Lokal';
-    wx.innerHTML=`${icon} <b>${Math.round(c.temperature_2m)}°C</b> (rasa ${Math.round(c.apparent_temperature)}°C)<br>📍${city}<br>💨${Math.round(c.windspeed_10m)}km/h 💧${c.relative_humidity_2m}%`;
-  }catch{wx.innerHTML='<span style="opacity:.4">CUACA N/A</span>';}
+    const wR=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weathercode,windspeed_10m,relative_humidity_2m,apparent_temperature&timezone=auto`);
+    const wD=await wR.json(), c=wD.current, wc=c.weathercode;
+    const icon=wc===0?'☀️':wc<=2?'🌤':wc<=3?'⛅':wc<=45?'🌫':wc<=67?'🌧':wc<=77?'❄️':wc<=82?'🌦':'⛈';
+    // Nominatim dengan proper header
+    let city='Lokal';
+    try{
+      const gR=await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=10`,{headers:{'Accept-Language':'id','User-Agent':'ESP.AI/1.0'}});
+      const gD=await gR.json();
+      city=gD.address?.city||gD.address?.town||gD.address?.county||gD.address?.village||'Lokal';
+    }catch{}
+    wx.innerHTML=`${icon} <b style="color:var(--y)">${Math.round(c.temperature_2m)}°C</b> <span style="opacity:.7">(rasa ${Math.round(c.apparent_temperature)}°C)</span><br>📍 ${city}<br>💨 ${Math.round(c.windspeed_10m)}km/h &nbsp; 💧 ${c.relative_humidity_2m}%`;
+  }catch(e){
+    wx.innerHTML='<span style="opacity:.4;color:var(--r)">CUACA GAGAL — TAP ⟳</span>';
+  }
 }
 
 // ── Controls ──────────────────────────────────────────────
@@ -623,6 +690,16 @@ async function flipCam(){
     const s=await navigator.mediaDevices.getUserMedia({video:{facingMode,width:{ideal:1280},height:{ideal:720}}});
     video.srcObject=s;
   }catch(e){}
+}
+function togCatMode(){
+  catMode=!catMode;
+  const b=document.getElementById('btn-cat');
+  b.classList.toggle('on',catMode);
+  b.textContent=catMode?'🐱 CARI ON':'🐱 CARI';
+  if(catMode){
+    lastAi=0;
+    if(navigator.vibrate) navigator.vibrate(200);
+  }
 }
 function showAiModal(){document.getElementById('overlay').style.display='flex';if(apiKey)document.getElementById('api-inp').value=apiKey;}
 function closeModal(){document.getElementById('overlay').style.display='none';}
