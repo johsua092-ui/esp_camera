@@ -84,7 +84,8 @@ input[type=range]#zoom-slider::-webkit-slider-runnable-track{background:rgba(0,2
 #ptxt{color:var(--g);font-size:10px;letter-spacing:2px;opacity:.55;text-align:center}
 #err{display:none;position:fixed;inset:0;background:#000;flex-direction:column;align-items:center;justify-content:center;gap:18px;z-index:31;padding:30px}
 #err p{color:var(--r);font-size:11px;letter-spacing:1px;text-align:center;line-height:2.2}
-.app-nv #video{filter:brightness(2.6) contrast(1.9) grayscale(1)}
+.app-nv #video{filter:brightness(1.8) contrast(1.4) saturate(0) hue-rotate(80deg) sepia(0.3);}
+.app-nv #nvtint{background:rgba(0,60,0,0.25)!important;}
 </style>
 </head>
 <body>
@@ -321,7 +322,7 @@ function getDir(ox,oy){
 }
 
 // Non-max suppression — remove duplicate overlapping boxes
-function nms(boxes, thr=0.42){
+function nms(boxes, thr=0.55){
   if(!boxes.length)return[];
   boxes.sort((a,b)=>b.score-a.score);
   const keep=[], used=new Set();
@@ -445,7 +446,7 @@ async function runAI(){
         max_tokens:1500,
         messages:[{role:'user',content:[
           {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}},
-          {type:'text',text:'You are an object detection system. Detect ALL visible objects especially cats, people, animals. Return ONLY a raw JSON array with no markdown, no code blocks, no explanation. Each item: {"label":"exact_english_name","x":0.0,"y":0.0,"w":0.0,"h":0.0,"conf":0.0} where x,y are top-left corner as fraction of image width/height, w,h are width/height fractions. conf is 0-1 confidence. Minimum confidence 0.4. Pay extra attention to cats - detect even partially hidden cats.'}
+          {type:'text',text:'You are a precise object detection AI. Carefully examine this image and detect ALL visible objects. Return ONLY a raw JSON array, no markdown, no explanation. Format: [{"label":"english_name","x":0.0,"y":0.0,"w":0.0,"h":0.0,"conf":0.0}] where x,y=top-left as fraction of image size, w,h=size fractions, conf=0-1. Detect: people, faces, cats, dogs, all animals, cars, motorcycles, all vehicles, chairs, tables, sofas, all furniture, phones, laptops, TVs, all electronics, bottles, cups, food, fruits, bags, plants, books, any other objects. Be thorough - detect partially visible objects too. Min confidence 0.3. Label in lowercase English.'}
         ]}]
       })
     });
@@ -454,7 +455,7 @@ async function runAI(){
     let txt=(d.choices?.[0]?.message?.content||'[]');
     txt=txt.replace(/```[\w]*\n?/g,'').replace(/```/g,'').trim();
     const parsed=JSON.parse(txt);
-    aiObjs=parsed.filter(o=>o.conf>=0.4).map(o=>({...o,sw:s.width,sh:s.height}));
+    aiObjs=parsed.filter(o=>o.conf>=0.3).map(o=>({...o,sw:s.width,sh:s.height}));
     document.getElementById('ai-st').textContent='✦AI '+aiObjs.length+'obj';
     document.getElementById('ai-st').style.color='var(--g)';
   }catch(e){
@@ -496,15 +497,14 @@ async function loop(){
   frameCount++;
 
   if(espOn){
-    // TF.js COCO — run every 2 frames for FPS boost
-    if(coco&&frameCount%2===0){
+    // TF.js COCO — run every frame, lower threshold for better detection
+    if(coco){
       let ps=[];
       try{
-        // Cat mode: lebih sensitif, threshold lebih rendah
-        const thresh=catMode?0.15:0.25;
-        ps=await coco.detect(video,catMode?5:20,thresh);
+        const thresh=catMode?0.12:0.18;
+        const maxDet=catMode?8:30;
+        ps=await coco.detect(video,maxDet,thresh);
       }catch(e){}
-      // Cat mode: filter hanya cat
       const filtered=catMode?ps.filter(p=>p.class==='cat'):ps;
       nms(filtered).forEach(p=>{
         const r=scr(p.bbox[0],p.bbox[1],p.bbox[2],p.bbox[3],t);
@@ -525,7 +525,7 @@ async function loop(){
     }
 
     // BlazeFace — skip kalau cat mode aktif (hemat FPS)
-    if(face&&!catMode&&frameCount%3===0){
+    if(face&&!catMode){
       let fs=[];
       try{fs=await face.estimateFaces(video,false);}catch(e){}
       fs.forEach(f=>{
@@ -732,7 +732,12 @@ async function init(){
     return;
   }
   prog('20%','MEMUAT COCO-SSD...');
-  try{coco=await cocoSsd.load({base:'mobilenet_v2'});}catch(e){console.warn(e);}
+  try{
+    // lite_mobilenet_v2: lebih cepat, cukup akurat untuk realtime
+    coco=await cocoSsd.load({base:'lite_mobilenet_v2'});
+  }catch(e){
+    try{coco=await cocoSsd.load({base:'mobilenet_v2'});}catch(e2){console.warn(e2);}
+  }
   prog('65%','MEMUAT FACE MODEL...');
   try{face=await blazeface.load();}catch(e){console.warn(e);}
   prog('85%','MEMUAT CUACA...');
